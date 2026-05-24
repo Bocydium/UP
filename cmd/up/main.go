@@ -6,11 +6,16 @@ import (
 	"strings"
 
 	"github.com/aapollo/up/internal/aur"
+	"github.com/aapollo/up/internal/backup"
 	"github.com/aapollo/up/internal/cache"
 	"github.com/aapollo/up/internal/cli"
+	"github.com/aapollo/up/internal/diff"
 	"github.com/aapollo/up/internal/flatpak"
+	"github.com/aapollo/up/internal/health"
 	"github.com/aapollo/up/internal/pacman"
+	"github.com/aapollo/up/internal/plan"
 	"github.com/aapollo/up/internal/security"
+	"github.com/aapollo/up/internal/tree"
 	"github.com/aapollo/up/internal/ui"
 )
 
@@ -34,6 +39,14 @@ func main() {
 		handleSearch(args)
 	case "info":
 		handleInfo(args)
+	case "diff":
+		handleDiff(args)
+	case "tree":
+		handleTree(args)
+	case "backup":
+		handleBackup(args)
+	case "plan":
+		handlePlan(args)
 	case "cache":
 		handleCache(args)
 	case "help", "-h", "--help":
@@ -54,6 +67,10 @@ Commands:
   up upda                 Update all packages (pacman + AUR + flatpak)
   up search <query>       Search for packages
   up info <package>       Show package details
+  up diff <package>       Show file changes before update
+  up tree <package>       Show dependency tree
+  up backup               Save package list snapshot
+  up plan <package>       Dry-run: show what would happen
   up cache                Show cache size
   up cache clean          Clean old cached builds
 
@@ -71,6 +88,16 @@ func handleInstall(args []string) {
 
 	pkg := args[0]
 	flags := cli.ParseFlags(args[1:])
+
+	// Check for --plan flag
+	if flags.Plan {
+		p, err := plan.InstallPlan(pkg)
+		if err != nil {
+			ui.Fatal("Plan failed: %v", err)
+		}
+		p.Print()
+		return
+	}
 
 	ui.Header("Installing %s", pkg)
 
@@ -99,6 +126,12 @@ func handleInstall(args []string) {
 	}
 
 	ui.Step("Found in AUR: %s (%s)", result.Name, result.Version)
+
+	// Show health score
+	score := health.Calculate(result)
+	fmt.Printf("  Health: %s%s%s %d/100 %s\n",
+		score.Color(), score.Bar(), ui.Reset(),
+		score.Value, score.Verdict)
 
 	if !flags.NoCheck {
 		ui.Step("Running security checks...")
@@ -178,7 +211,11 @@ func handleSearch(args []string) {
 	ui.Step("AUR:")
 	if results, err := aur.SearchMulti(query); err == nil {
 		for _, r := range results {
-			fmt.Printf("  aur/%s %s (+%d)\n    %s\n", r.Name, r.Version, r.Votes, r.Description)
+			score := health.Calculate(&r)
+			fmt.Printf("  aur/%s %s (+%d) %s%d%s/100\n    %s\n",
+				r.Name, r.Version, r.Votes,
+				score.Color(), score.Value, ui.Reset(),
+				r.Description)
 		}
 	}
 }
@@ -202,6 +239,10 @@ func handleInfo(args []string) {
 
 	if info, err := aur.Info(pkg); err == nil {
 		ui.Header("aur/%s %s", info.Name, info.Version)
+		score := health.Calculate(info)
+		fmt.Printf("  Health:     %s%s%s %d/100 %s\n",
+			score.Color(), score.Bar(), ui.Reset(),
+			score.Value, score.Verdict)
 		fmt.Printf("  Description: %s\n", info.Description)
 		fmt.Printf("  URL: %s\n", info.URL)
 		fmt.Printf("  Votes: %d\n", info.Votes)
@@ -211,6 +252,72 @@ func handleInfo(args []string) {
 	}
 
 	ui.Fatal("Package %s not found", pkg)
+}
+
+func handleDiff(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "up: diff requires a package name")
+		os.Exit(1)
+	}
+	if err := diff.Show(args[0]); err != nil {
+		ui.Fatal("%v", err)
+	}
+}
+
+func handleTree(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "up: tree requires a package name")
+		os.Exit(1)
+	}
+	if err := tree.Show(args[0]); err != nil {
+		ui.Fatal("%v", err)
+	}
+}
+
+func handleBackup(args []string) {
+	if len(args) == 0 {
+		if err := backup.List(); err != nil {
+			ui.Fatal("%v", err)
+		}
+		return
+	}
+
+	switch args[0] {
+	case "create", "save":
+		desc := ""
+		if len(args) > 1 {
+			desc = strings.Join(args[1:], " ")
+		}
+		if err := backup.Create(desc); err != nil {
+			ui.Fatal("%v", err)
+		}
+	case "restore":
+		if len(args) < 2 {
+			ui.Fatal("backup restore requires a timestamp")
+		}
+		if err := backup.Restore(args[1]); err != nil {
+			ui.Fatal("%v", err)
+		}
+	default:
+		ui.Fatal("Unknown backup command: %s", args[0])
+	}
+}
+
+func handlePlan(args []string) {
+	if len(args) == 0 {
+		p, err := plan.UpdatePlan()
+		if err != nil {
+			ui.Fatal("Plan failed: %v", err)
+		}
+		p.Print()
+		return
+	}
+
+	p, err := plan.InstallPlan(args[0])
+	if err != nil {
+		ui.Fatal("Plan failed: %v", err)
+	}
+	p.Print()
 }
 
 func handleCache(args []string) {

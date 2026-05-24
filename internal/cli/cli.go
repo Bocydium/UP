@@ -6,6 +6,7 @@ type Flags struct {
 	NoCheck   bool
 	Needed    bool
 	Quiet     bool
+	Plan      bool
 }
 
 // ParseFlags extracts flags from args and returns the remaining positional args.
@@ -21,6 +22,8 @@ func ParseFlags(args []string) Flags {
 			f.Needed = true
 		case "-q", "--quiet":
 			f.Quiet = true
+		case "--plan":
+			f.Plan = true
 		}
 	}
 	return f
