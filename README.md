@@ -1,10 +1,10 @@
 # up
 
-The fast, secure package manager for Arch Linux. Like `yay`, but cleaner, safer, and actually unique.
+The fast, secure, self-contained package manager for Arch Linux. No subprocess spam. No pacman noise. Just `up`.
 
 ## What it does
 
-`up` wraps `pacman`, `makepkg`, and the AUR into a single tool with deep security scanning, intelligent caching, and features no other helper has.
+`up` downloads packages directly from Arch mirrors, extracts them natively, and tracks everything in its own database. For AUR packages, it builds with `makepkg` but caches binaries so you never rebuild the same package twice.
 
 ## Commands
 
@@ -37,11 +37,12 @@ up cache                    # Show cache size
 up cache clean              # Clean old cached builds
 ```
 
-## Why it's different from yay
+## Why it's different
 
 | Feature | yay | up |
 |---|---|---|
-| Clean TUI | Noisy prompts | Minimal, fast output |
+| Clean output | Noisy pacman spam | Minimal, only what matters |
+| Official repo installs | `pacman -S` subprocess | Native HTTP download + extract |
 | Security scanning | None | Deep PKGBUILD analysis |
 | Binary cache | None | Hash-based, skips rebuilds |
 | Dry-run plan | No | `up plan` shows everything before it happens |
@@ -51,6 +52,23 @@ up cache clean              # Clean old cached builds
 | Backup/restore | No | `up backup` saves package lists |
 | Auto-remove deps | Manual | `up remo` cleans everything |
 | Flatpak integration | No | Built into `up upda` |
+
+## Architecture
+
+**Official repos (fully native):**
+1. Sync repo databases from mirrors over HTTP
+2. Search databases for package metadata
+3. Download `.pkg.tar.zst` directly from mirror
+4. Extract natively with zstd + tar (no `pacman -U`)
+5. Track installed files in local database
+
+**AUR (cached builds):**
+1. Search AUR RPC API
+2. Clone PKGBUILD git repo
+3. Run security scan on PKGBUILD
+4. Build with `makepkg` (only if not cached)
+5. Cache binary by PKGBUILD hash
+6. Install from cache on subsequent runs
 
 ## Security
 
@@ -96,16 +114,8 @@ sudo install -Dm755 up /usr/local/bin/up
 ## Requirements
 
 - Arch Linux (or derivative)
-- `pacman`, `makepkg`, `git`, `sudo`
+- `makepkg`, `git` (for AUR builds only)
 - Optional: `flatpak`
-
-## How it works
-
-1. **Official repos**: Checks `pacman -Si` first. If found, installs via `sudo pacman -S`.
-2. **AUR**: Searches the AUR RPC API, clones the git repo, runs `makepkg`, installs with `pacman -U`.
-3. **Security**: Before building, scans PKGBUILD for dangerous commands and missing checksums.
-4. **Cache**: After building, caches the binary by PKGBUILD hash. Future installs skip the build.
-5. **Updates**: `up upda` runs `pacman -Syu` (asks for confirmation), then checks AUR packages for version bumps (with cache), then `flatpak update`.
 
 ## License
 
