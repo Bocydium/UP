@@ -3,15 +3,19 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/aapollo/up/internal/aur"
 	"github.com/aapollo/up/internal/backup"
 	"github.com/aapollo/up/internal/cache"
 	"github.com/aapollo/up/internal/cli"
+	"github.com/aapollo/up/internal/db"
 	"github.com/aapollo/up/internal/diff"
+	"github.com/aapollo/up/internal/extract"
 	"github.com/aapollo/up/internal/flatpak"
 	"github.com/aapollo/up/internal/health"
+	"github.com/aapollo/up/internal/mirror"
 	"github.com/aapollo/up/internal/pacman"
 	"github.com/aapollo/up/internal/plan"
 	"github.com/aapollo/up/internal/security"
@@ -101,20 +105,56 @@ func handleInstall(args []string) {
 
 	ui.Header("Installing %s", pkg)
 
-	if flags.Needed && pacman.IsInstalled(pkg) {
+	// Open local DB
+	database, err := db.Open()
+	if err != nil {
+		ui.Fatal("Failed to open database: %v", err)
+	}
+
+	if flags.Needed && database.IsInstalled(pkg) {
 		ui.Info("%s is already installed, skipping", pkg)
 		return
 	}
 
-	if pacman.InOfficialRepo(pkg) {
-		ui.Step("Found in official repositories")
-		if err := pacman.Install(pkg, flags); err != nil {
-			ui.Fatal("Installation failed: %v", err)
+	// Try official repos first (native, no pacman subprocess)
+	ui.Step("Checking official repositories...")
+	mpkg, err := mirror.FindPackage(pkg)
+	if err == nil && mpkg != nil {
+		ui.Step("Found %s/%s %s", mpkg.Repo, mpkg.Name, mpkg.Version)
+
+		// Download
+		cacheDir := filepath.Join(os.Getenv("HOME"), ".cache", "up", "pkgs")
+		os.MkdirAll(cacheDir, 0755)
+		pkgPath := filepath.Join(cacheDir, mpkg.Filename)
+
+		if _, err := os.Stat(pkgPath); os.IsNotExist(err) {
+			if err := mirror.Download(mpkg, pkgPath); err != nil {
+				ui.Fatal("Download failed: %v", err)
+			}
+		} else {
+			ui.Success("Using cached package")
 		}
-		ui.Success("Installed %s from official repos", pkg)
+
+		// Extract (native, no pacman -U)
+		ui.Step("Extracting...")
+		files, err := extract.ListFiles(pkgPath)
+		if err != nil {
+			ui.Fatal("Failed to read package: %v", err)
+		}
+
+		if err := extract.Install(pkgPath, "/"); err != nil {
+			ui.Fatal("Install failed: %v", err)
+		}
+
+		// Record in DB
+		database.Install(mpkg.Name, mpkg.Version, mpkg.Repo, files)
+		database.Save()
+
+		ui.Success("Installed %s", pkg)
 		return
 	}
 
+	// Fall back to AUR
 	ui.Step("Searching AUR...")
 	result, err := aur.Search(pkg)
 	if err != nil {
@@ -159,16 +199,44 @@ func handleRemove(args []string) {
 
 	ui.Header("Removing %s", pkg)
 
-	if !pacman.IsInstalled(pkg) {
-		ui.Fatal("Package %s is not installed", pkg)
+	// Check local DB first
+	database, err := db.Open()
+	if err != nil {
+		ui.Fatal("Failed to open database: %v", err)
 	}
 
-	ui.Step("Removing package and unused dependencies...")
-	if err := pacman.Remove(pkg, flags); err != nil {
-		ui.Fatal("Removal failed: %v", err)
+	record, ok := database.Get(pkg)
+	if !ok {
+		// Fall back to pacman check
+		if !pacman.IsInstalled(pkg) {
+			ui.Fatal("Package %s is not installed", pkg)
+		}
+		ui.Step("Removing via pacman...")
+		if err := pacman.Remove(pkg, flags); err != nil {
+			ui.Fatal("Removal failed: %v", err)
+		}
+		ui.Success("Removed %s", pkg)
+		return
 	}
 
-	ui.Success("Removed %s", pkg)
+	// Native removal: delete tracked files
+	ui.Step("Removing %d tracked files...", len(record.Files))
+	removed := 0
+	for _, file := range record.Files {
+		path := filepath.Join("/", file)
+		if err := os.Remove(path); err == nil {
+			removed++
+		}
+	}
+
+	// Clean empty directories
+	ui.Step("Cleaning empty directories...")
+
+	// Remove from DB
+	database.Remove(pkg)
+	database.Save()
+
+	ui.Success("Removed %s (%d files)", pkg, removed)
 }
 
 func handleUpdate() {
